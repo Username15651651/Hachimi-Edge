@@ -1,5 +1,5 @@
 use crate::{
-    core::{Hachimi, game::Region, utils::{mul_int, str_visual_len}},
+    core::{Hachimi, game::Region, tl_repo, utils::{mul_int, str_visual_len}},
     il2cpp::{ext::{Il2CppStringExt, StringExt}, hook::{UnityEngine_CoreModule::{Component, Object, UnityAction}, UnityEngine_UI::{EventSystem, Text}}, sql::{self, TextDataQuery}, symbols::{create_delegate, get_field_from_name, get_field_object_value, get_method_addr}, types::*}
 };
 use once_cell::sync::Lazy;
@@ -101,6 +101,44 @@ fn UpdateItemCommon(this: *mut Il2CppObject, skill_info: *mut Il2CppObject, orig
             Text::set_horizontalOverflow(desc, 1);
         }
     }
+    
+    // 在这里设置技能详情的点击事件，替代原来的SetupOnClickSkillButton hook
+    if Hachimi::instance().config.load().skill_info_dialog {
+        let skill_id = get_Id(skill_info);
+        let button = get__bgButton(this);
+        if !button.is_null() {
+            let button_obj = Component::get_gameObject(button);
+            Object::set_name(button_obj, format!("HachimiSkill_{}", skill_id).to_il2cpp_string());
+            get_skill_text(skill_id);
+
+            let delegate = create_delegate(unsafe { UnityAction::UNITYACTION_CLASS }, 0, || {
+                let current_ev = EventSystem::get_current();
+                let clicked_obj = EventSystem::get_currentSelectedGameObject(current_ev);
+                let object_name = Object::get_name(clicked_obj);
+                let name_str = unsafe { (*object_name).as_utf16str() }.to_string();
+
+                if name_str.starts_with("HachimiSkill_") {
+                    let id_str = &name_str["HachimiSkill_".len()..];
+                    if let Ok(id) = id_str.parse::<i32>() {
+                        if let Some(data) = SKILL_TEXT_CACHE.lock().unwrap().get(&id) {
+                            let (name, desc) = data;
+                            let typ = if str_visual_len(desc.as_str()) <= 250 {
+                                DialogCommon::FormType::SMALL_ONE_BUTTON
+                            } else if str_visual_len(desc.as_str()) <= 490 {
+                                DialogCommon::FormType::MIDDLE_ONE_BUTTON
+                            } else {
+                                DialogCommon::FormType::BIG_ONE_BUTTON
+                            };
+                            DialogManager::single_button_message(name, &desc.replace("\\n", "\n"), typ);
+                        }
+                    }
+                }
+            });
+            if let Some(delegate) = delegate {
+                ButtonCommon::SetOnClick(button, delegate);
+            }
+        }
+    }
 }
 
 type UpdateItemJpFn = extern "C" fn(this: *mut Il2CppObject, skill_info: *mut Il2CppObject, is_plate_effect_enable: bool, adjuster_data: *mut Il2CppObject, resource_hash: i32);
@@ -118,6 +156,20 @@ extern "C" fn UpdateItemOther(this: *mut Il2CppObject, skill_info: *mut Il2CppOb
 }
 
 fn get_skill_text(skill_id: i32) -> (String, String) {
+    // 先检查用户自定义的技能详情
+    let details = tl_repo::SKILL_DETAILS.lock().unwrap();
+    if let Some(custom_detail) = details.get(&(skill_id as u32)) {
+        // 解析用户自定义的详情：第一行是名字，剩下的是描述
+        let mut lines = custom_detail.lines();
+        let name = lines.next().unwrap_or("").to_string();
+        let desc = lines.collect::<Vec<_>>().join("\n");
+        
+        let mut cache = SKILL_TEXT_CACHE.lock().unwrap();
+        cache.insert(skill_id, (name.clone(), desc.clone()));
+        return (name, desc);
+    }
+    
+    // 没有自定义详情，使用原来的逻辑
     let to_s = |opt_ptr: Option<*mut Il2CppString>| unsafe {
         opt_ptr.and_then(|p| p.as_ref()).map(|s| s.as_utf16str().to_string())
     };
@@ -139,43 +191,7 @@ fn get_skill_text(skill_id: i32) -> (String, String) {
     (current_name, current_desc)
 }
 
-type SetupOnClickSkillButtonFn = extern "C" fn(this: *mut Il2CppObject, info: *mut Il2CppObject);
-extern "C" fn SetupOnClickSkillButton(this: *mut Il2CppObject, info: *mut Il2CppObject) {
-    if !Hachimi::instance().config.load().skill_info_dialog {
-        get_orig_fn!(SetupOnClickSkillButton, SetupOnClickSkillButtonFn)(this, info);
-        return;
-    }
-    let skill_id = get_Id(info);
-    let button = get__bgButton(this);
-    let button_obj = Component::get_gameObject(button);
-    Object::set_name(button_obj, format!("HachimiSkill_{}", skill_id).to_il2cpp_string());
-    get_skill_text(skill_id);
 
-    let delegate = create_delegate(unsafe { UnityAction::UNITYACTION_CLASS }, 0, || {
-        let current_ev = EventSystem::get_current();
-        let clicked_obj = EventSystem::get_currentSelectedGameObject(current_ev);
-        let object_name = Object::get_name(clicked_obj);
-        let name_str = unsafe { (*object_name).as_utf16str() }.to_string();
-
-        if name_str.starts_with("HachimiSkill_") {
-            let id_str = &name_str["HachimiSkill_".len()..];
-            if let Ok(id) = id_str.parse::<i32>() {
-                if let Some(data) = SKILL_TEXT_CACHE.lock().unwrap().get(&id) {
-                    let (name, desc) = data;
-                    let typ = if str_visual_len(desc.as_str()) <= 250 {
-                        DialogCommon::FormType::SMALL_ONE_BUTTON
-                    } else if str_visual_len(desc.as_str()) <= 490 {
-                        DialogCommon::FormType::MIDDLE_ONE_BUTTON
-                    } else {
-                        DialogCommon::FormType::BIG_ONE_BUTTON
-                    };
-                    DialogManager::single_button_message(name, &desc.replace("\\n", "\n"), typ);
-                }
-            }
-        }
-    });
-    ButtonCommon::SetOnClick(button, delegate.unwrap());
-}
 
 pub fn init(umamusume: *const Il2CppImage) {
     get_class_or_return!(umamusume, Gallop, PartsSingleModeSkillListItem);
@@ -190,8 +206,7 @@ pub fn init(umamusume: *const Il2CppImage) {
         new_hook!(UpdateItem_addr, UpdateItemOther);
     }
 
-    let SetupOnClickSkillButton_addr = get_method_addr(PartsSingleModeSkillListItem, c"SetupOnClickSkillButton", 1);
-    new_hook!(SetupOnClickSkillButton_addr, SetupOnClickSkillButton);
+
 
     unsafe {
         // PartsSingleModeSkillListItem
