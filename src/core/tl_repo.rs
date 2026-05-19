@@ -2,6 +2,13 @@ use std::{collections::HashSet, fs, io::{Read, Write, Cursor}, path::{Path, Path
 
 use arc_swap::ArcSwap;
 use fnv::FnvHashMap;
+
+
+// 新增：技能详情功能的全局状态
+pub static SKILL_DETAILS: Lazy<Mutex<FnvHashMap<u32, String>>> = Lazy::new(|| Mutex::default());
+pub static SHOW_DETAIL_DIALOG: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
+pub static CURRENT_SKILL_DETAIL: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
+
 use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 use size::Size;
